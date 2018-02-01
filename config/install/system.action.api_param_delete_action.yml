@@ -1,0 +1,10 @@
+langcode: en
+status: true
+dependencies:
+  module:
+    - dp_docs
+id: api_param_delete_action
+label: 'Delete API Parameter'
+type: api_param
+plugin: api_param_delete_action
+configuration: {  }

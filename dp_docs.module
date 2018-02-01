@@ -1,0 +1,785 @@
+<?php
+
+/**
+ * @file
+ * Main module file for Devportal Docs.
+ */
+
+use Drupal\Core\Routing\RouteMatchInterface;
+
+/**
+ * Implements hook_help().
+ */
+function dp_docs_help($route_name, RouteMatchInterface $route_match) {
+  switch ($route_name) {
+    // Main module help for the dp_docs module.
+    case 'help.page.dp_docs':
+      $output = '';
+      $output .= '<h3>' . t('About') . '</h3>';
+      $output .= '<p>' . t('') . '</p>';
+      return $output;
+
+    default:
+  }
+}
+
+/**
+ * Gets the list of API content entity types this module defines.
+ *
+ * @return array
+ *   An array of defined API content entity types EXCEPT api_ref.
+ */
+function dp_docs_get_api_content_entity_types() {
+  return [
+    'api_doc',
+    'api_body_param',
+    'api_contact',
+    'api_endpoint',
+    'api_endpoint_set',
+    'api_ext_doc',
+    'api_form_data_param',
+    'api_global_param',
+    'api_global_schema',
+    'api_header_param',
+    'api_license',
+    'api_meta_param',
+    'api_method',
+    'api_param',
+    'api_param_item',
+    'api_path_param',
+    'api_query_param',
+    'api_response',
+    'api_response_example',
+    'api_response_header',
+    'api_response_set',
+    'api_global_response',
+    'api_schema',
+    'api_tag',
+    'api_version_tag',
+    'api_info',
+  ];
+}
+
+/**
+ * Implements hook_menu_links_discovered_alter().
+ */
+function dp_docs_menu_links_discovered_alter(&$links) {
+  foreach (dp_docs_get_api_content_entity_types() as $entity_type) {
+    // Add links to each entity type.
+    foreach (\Drupal::entityTypeManager()->getStorage("{$entity_type}_type")->loadMultiple() as $type) {
+      $links["entity.{$entity_type}.add." . $type->id()] = [
+        'title' => t($type->label()),
+        'route_name' => "entity.{$entity_type}.add_form",
+        'parent' => "entity.{$entity_type}.add_page",
+        'route_parameters' => ["{$entity_type}_type" => $type->id()],
+      ];
+    }
+  }
+}
+
+/**
+ * Implements hook_entity_bundle_create().
+ */
+function dp_docs_entity_bundle_create($entity_type_id, $bundle) {
+  // When an API Doc bundle is created, we should create such a bundle in all
+  // other entity types of ours that might have a bundle. Do not create bundles
+  // during installation because we also have exported bundle configurations.
+  if (($entity_type_id == 'api_doc') && !drupal_installation_attempted()) {
+    $entity_type_manager = \Drupal::entityTypeManager();
+    $entity_types = array_diff(dp_docs_get_api_content_entity_types(), ['api_doc']);
+
+    // Retrieve the name of the just-created API Doc bundle.
+    $name = $entity_type_manager->getStorage('api_doc_type')->load($bundle)->label();
+
+    // Create a bundle in all the above-listed entity types.
+    foreach ($entity_types as $entity_type) {
+      // Retrieve the definition (ie. the annotation info) of the current
+      // (content) entity type...
+      $entity_type_definition = $entity_type_manager->getDefinition($entity_type);
+      // ...to know the entity type serving as the bundle on it.
+      $bundle_entity_type_id = $entity_type_definition->getBundleEntityType();
+      // Then retrieve the definition (ie. the annotation info) of the bundle
+      // (config) entity type...
+      $bundle_entity_type_definition = $entity_type_manager->getDefinition($bundle_entity_type_id);
+      // ...to be able to actually create the bundle. OTOH, if there's a bundle
+      // with that ID (machine name) already, we shouldn't create it, not even
+      // touch it.
+      if ($entity_type_manager->getStorage($bundle_entity_type_id)->load($bundle)) {
+        continue;
+      }
+      $new_bundle = $entity_type_manager->getStorage($bundle_entity_type_id)->create([
+        $bundle_entity_type_definition->getKey('label') => $name,
+        $bundle_entity_type_definition->getKey('id') => $bundle,
+      ]);
+      $new_bundle->save();
+    }
+  }
+}
+
+/**
+ * Returns a list of available API Documentation type names.
+ *
+ * This list can include types that are queued for addition or deletion.
+ *
+ * @return string[]
+ *   An array of API Documentation type labels, keyed by the API Documentation
+ *   type name.
+ */
+function dp_docs_api_doc_type_get_names() {
+  return array_map(function ($bundle_info) {
+    return $bundle_info['label'];
+  }, \Drupal::entityManager()->getBundleInfo('api_doc'));
+}
+
+/**
+ * Marks a API Documentation to be re-indexed by the api_doc_search plugin.
+ *
+ * @param int $api_doc_id
+ *   The API Documentation ID.
+ */
+function dp_docs_reindex_api_doc_search($api_doc_id) {
+  if (\Drupal::moduleHandler()->moduleExists('search')) {
+    // Reindex API Documentation context indexed by the dp_docs module
+    // API Documentation search plugin.
+    search_mark_for_reindex('api_doc_search', $api_doc_id);
+  }
+}
+
+/**
+ * Implements hook_theme().
+ */
+function dp_docs_theme($existing, $type, $theme, $path) {
+  $entity_types = dp_docs_get_api_content_entity_types();
+  $entity_types[] = 'api_ref';
+
+  $theme = [];
+  foreach ($entity_types as $entity_type) {
+    $theme[$entity_type] = [
+      'render element' => 'elements',
+      'file' => $entity_type . '.page.inc',
+      'template' => strtr($entity_type, '_', '-'),
+    ];
+  }
+
+  $theme['api_method_navigation_block'] = [
+    'render element' => 'elements',
+    'variables' => [
+      'tags' => [],
+    ],
+    'template' => 'api-method-navigation-block',
+  ];
+
+  return $theme;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_ref(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIRef $entity */
+  $entity = $variables['elements']['#api_ref'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_doc(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIDoc $entity */
+  $entity = $variables['elements']['#api_doc'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_body_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIBodyParam $entity */
+  $entity = $variables['elements']['#api_body_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_contact(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIContact $entity */
+  $entity = $variables['elements']['#api_contact'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_endpoint(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIEndpoint $entity */
+  $entity = $variables['elements']['#api_endpoint'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_endpoint_set(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIEndpointSet $entity */
+  $entity = $variables['elements']['#api_endpoint_set'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_ext_doc(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIExtDoc $entity */
+  $entity = $variables['elements']['#api_ext_doc'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_form_data_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIFormDataParam $entity */
+  $entity = $variables['elements']['#api_form_data_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_global_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIGlobalParam $entity */
+  $entity = $variables['elements']['#api_global_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_global_schema(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIGlobalSchema $entity */
+  $entity = $variables['elements']['#api_global_schema'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_header_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIHeaderParam $entity */
+  $entity = $variables['elements']['#api_header_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_license(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APILicense $entity */
+  $entity = $variables['elements']['#api_license'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_meta_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIMetaParam $entity */
+  $entity = $variables['elements']['#api_meta_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_method(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIMethod $entity */
+  $entity = $variables['elements']['#api_method'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIParam $entity */
+  $entity = $variables['elements']['#api_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_param_item(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIParamItem $entity */
+  $entity = $variables['elements']['#api_param_item'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_path_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIPathParam $entity */
+  $entity = $variables['elements']['#api_path_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_query_param(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIQueryParam $entity */
+  $entity = $variables['elements']['#api_query_param'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_response(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIResponse $entity */
+  $entity = $variables['elements']['#api_response'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_response_example(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIResponseExample $entity */
+  $entity = $variables['elements']['#api_response_example'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_response_header(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIResponseHeader $entity */
+  $entity = $variables['elements']['#api_response_header'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_response_set(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIResponseSet $entity */
+  $entity = $variables['elements']['#api_response_set'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_global_response(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIGlobalResponse $entity */
+  $entity = $variables['elements']['#api_global_response'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_schema(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APISchema $entity */
+  $entity = $variables['elements']['#api_schema'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_tag(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APITag $entity */
+  $entity = $variables['elements']['#api_tag'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_version_tag(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIVersionTag $entity */
+  $entity = $variables['elements']['#api_version_tag'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_theme_suggestions_HOOK().
+ */
+function dp_docs_theme_suggestions_api_info(array $variables) {
+  $suggestions = [];
+  /** @var \Drupal\dp_docs\Entity\APIInfo $entity */
+  $entity = $variables['elements']['#api_info'];
+  $sanitized_view_mode = strtr($variables['elements']['#view_mode'], '.', '_');
+
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->bundle() . '__' . $sanitized_view_mode;
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id();
+  $suggestions[] = $entity->getEntityTypeId() . '__' . $entity->id() . '__' . $sanitized_view_mode;
+
+  return $suggestions;
+}
+
+/**
+ * Implements hook_views_data_alter().
+ */
+function dp_docs_views_data_alter(array &$data) {
+  // Entity reference base fields should have a reverse relationship in Views
+  // (just like the sitebuilder-added entity reference fields have), not only
+  // a forward relationship.
+  // @see core_field_views_data()
+  $entity_type_manager = \Drupal::entityTypeManager();
+  /** @var \Drupal\Core\Entity\EntityFieldManager $entity_field_manager */
+  $entity_field_manager = \Drupal::service('entity_field.manager');
+  $entity_types = $entity_type_manager->getDefinitions();
+  foreach ($entity_types as $source_entity_type_id => $source_entity_type) {
+    // Handle only our own entity types as source.
+    if ($source_entity_type->getProvider() != 'dp_docs') {
+      continue;
+    }
+    // Handle only content entity types as source.
+    if (!($source_entity_type instanceof \Drupal\Core\Entity\ContentEntityType)) {
+      continue;
+    }
+    $base_field_definitions = $entity_field_manager->getBaseFieldDefinitions($source_entity_type_id);
+    foreach ($base_field_definitions as $base_field_id => $base_field_definition) {
+      // Handle only entity reference fields.
+      if ($base_field_definition->getType() != 'entity_reference') {
+        continue;
+      }
+      /** @var \Drupal\Core\Field\TypedData\FieldItemDataDefinition $item_definition */
+      $item_definition = $base_field_definition->getItemDefinition();
+      $field_definition = $item_definition->getFieldDefinition();
+      $field_storage = $field_definition->getFieldStorageDefinition();
+      $target_entity_type_id = $field_storage->getSetting('target_type');
+      $target_entity_type = $entity_type_manager->getDefinition($target_entity_type_id);
+      // Handle only our own entity types as target.
+      if ($target_entity_type->getProvider() != 'dp_docs') {
+        continue;
+      }
+      // Handle only content entity types as target.
+      if (!($target_entity_type instanceof \Drupal\Core\Entity\ContentEntityType)) {
+        continue;
+      }
+
+      // Here comes the heart of the dance.
+      $pseudo_field_name = 'reverse__' . $source_entity_type_id . '__' . $base_field_id;
+      $args = [
+        '@label' => $target_entity_type->getLabel(),
+        '@field_name' => $base_field_definition->getName(),
+        '@entity' => $source_entity_type->getLabel(),
+      ];
+      // The sitebuilder-added entity reference fields have the same storage
+      // schema regardless their cardinality. Sadly, this is not true for entity
+      // reference base fields: multi-value fields (ones with cardinality != 1)
+      // have a link table between the source and the target entities (just like
+      // sitebuilder-added fields have one regardless their cardinality).
+      if ($base_field_definition->isMultiple()) {
+        $views_table = $target_entity_type->getDataTable();
+        $field_table = $source_entity_type_id . '__' . $base_field_id;
+        $field_field = $base_field_id . '_' . $base_field_definition->getMainPropertyName();
+        $data[$views_table][$pseudo_field_name]['relationship'] = [
+          'title' => t('@entity using @field_name', $args),
+          'label' => t('Rev: @entity', $args),
+          'group' => $target_entity_type->getLabel(),
+          'help' => t('Relate each @entity with the @field_name field set to the @label.', $args),
+          'id' => 'entity_reverse',
+          'base' => $source_entity_type->getDataTable(),
+          //'entity_type' => $source_entity_type_id,
+          'base field' => $source_entity_type->getKey('id'),
+          //'base field' => 'entity_id',
+          'field_name' => $source_entity_type_id . '_' . $base_field_id,
+          'field table' => $field_table,
+          'field field' => $field_field,
+          'join_extra' => [
+            [
+              'field' => 'deleted',
+              'value' => 0,
+              'numeric' => TRUE,
+            ],
+          ],
+        ];
+      }
+      else {
+        $field_table = $target_entity_type->getDataTable();
+        $field_field = $base_field_id;
+        // Cannot use the `entity_reverse` @ViewsRelationship handler plugin here,
+        // since it always creates two JOINS, which is totally unneeded for
+        // single-value baseFields, because their value is available right away on
+        // the entity_type_field_data table.
+        $data[$field_table][$pseudo_field_name]['relationship'] = [
+          'title' => t('@entity using @field_name', $args),
+          'label' => t('Rev: @entity', $args),
+          'group' => $target_entity_type->getLabel(),
+          'help' => t('Relate each @entity with the @field_name field set to the @label.', $args),
+          'id' => 'standard',
+          'base' => $source_entity_type->getDataTable() ?: $source_entity_type->getBaseTable(),
+          'entity type' => $target_entity_type_id,
+          'base field' => $base_field_id,
+          'relationship field' => $target_entity_type->getKey('id'),
+        ];
+      }
+    }
+  }
+}
+
+/**
+ * Implements template_preprocess_HOOK().
+ *
+ * @param array $variables
+ */
+function template_preprocess_api_ref_add_list(&$variables) {
+  $variables['types'] = [];
+  if (!empty($variables['content'])) {
+    foreach ($variables['content'] as $type) {
+      /** @var $type \Drupal\dp_docs\Entity\APIRefType */
+      $variables['types'][$type->id()] = [
+        'type' => $type->id(),
+        'add_link' => \Drupal\Core\Link::createFromRoute($type->label(),'entity.api_ref.add', [
+          'api_ref_type' => $type->id(),
+        ]),
+        'description' => [
+          '#markup' => $type->description,
+        ],
+      ];
+    }
+  }
+}

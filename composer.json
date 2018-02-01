@@ -1,0 +1,9 @@
+{
+  "name": "Devportal Docs",
+  "type": "drupal-module",
+  "license": "GPL-2.0+",
+  "require": {
+    "php": ">=5.6.0",
+    "erusev/parsedown": "^1.6.3"
+  }
+}

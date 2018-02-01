@@ -1,0 +1,10 @@
+langcode: en
+status: true
+dependencies:
+  module:
+    - dp_docs
+id: api_doc_publish_action
+label: 'Publish API Documentation'
+type: api_doc
+plugin: api_doc_publish_action
+configuration: {  }

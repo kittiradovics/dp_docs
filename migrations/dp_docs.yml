@@ -1,0 +1,5 @@
+id: dp_docs
+deriver: Drupal\dp_docs\Plugin\MigrationConfigDeriver
+# @todo: https://www.drupal.org/node/2797421
+source:
+  plugin: embedded_data
